@@ -1,0 +1,339 @@
+WITH Overpayment_Report AS
+  (SELECT DB_Overpayment.client_id AS client_id,
+          DB_Overpayment.platform_id AS platform_id,
+          DB_Overpayment.payment_id AS PMT_ID,
+          DB_Overpayment.effective_date AS EFT_DT,
+          DB_Overpayment.balance_amount AS BAL_AT,
+          DB_Overpayment.repayment_type_code AS repayment_type_code,
+          DB_Overpayment.plan_id AS PLAN_ID,
+          DB_Overpayment.comments AS CMNTS,
+          DB_Overpayment.activity_reference_number_id AS ACT_REF_NMBR_ID,
+          DB_Overpayment.balance_apply_amount AS BAL_APLY_VL_AT,
+          CASE
+              WHEN DB_Overpayment.repayment_type_code = 'AO' THEN 'Overpayment Increase Adjustment'
+              WHEN DB_Overpayment.repayment_type_code = 'CO' THEN 'Conversion Overpayment'
+              WHEN DB_Overpayment.repayment_type_code = 'D' THEN 'Repayment deducted from ongoing pension payment'
+              WHEN DB_Overpayment.repayment_type_code = 'DA' THEN 'Overpayment Decrease Adjustment'
+              WHEN DB_Overpayment.repayment_type_code = 'DB' THEN 'Dead Beneficiary'
+              WHEN DB_Overpayment.repayment_type_code = 'DC' THEN 'Decrease Adjustment due to Paper Check Stop'
+              WHEN DB_Overpayment.repayment_type_code = 'DD' THEN 'Decrease Adj due to EFT Direct Deposit Reversal'
+              WHEN DB_Overpayment.repayment_type_code = 'DE' THEN 'Estate Repayment'
+              WHEN DB_Overpayment.repayment_type_code = 'DF' THEN 'Decrease For Federal Withholding Reversed'
+              WHEN DB_Overpayment.repayment_type_code = 'DP' THEN 'Participant Repayment'
+              WHEN DB_Overpayment.repayment_type_code = 'DR' THEN 'Decrease For Deductions Reversed'
+              WHEN DB_Overpayment.repayment_type_code = 'DS' THEN 'Decrease For State Withholding Reversed'
+              WHEN DB_Overpayment.repayment_type_code = 'E' THEN 'Repayment PCS Sent To Estate'
+              WHEN DB_Overpayment.repayment_type_code = 'OO' THEN 'Other Overpayment'
+              WHEN DB_Overpayment.repayment_type_code = 'RO' THEN 'Recalc Overpayment'
+              WHEN DB_Overpayment.repayment_type_code = 'RR' THEN 'Retro Payment Reduction'
+              WHEN DB_Overpayment.repayment_type_code = 'SO' THEN 'Death Overpayment Due From Survivor'
+              WHEN DB_Overpayment.repayment_type_code = 'T' THEN 'True Down'
+              WHEN DB_Overpayment.repayment_type_code = 'TB' THEN 'Transferred Overpayment Balance'
+              WHEN DB_Overpayment.repayment_type_code = 'XX' THEN 'Closed Overpayment Balance'
+          END AS Repayment_Type_text,
+          DB_Overpayment.platform_person_internal_id AS PRSN_INTN_ID
+   FROM wealth_rpt.db_overpayments DB_Overpayment
+   WHERE CASE
+             WHEN DATE (<<$pBeginDate>>) = CURRENT_DATE
+                  AND DATE (<<$pEndDate>>) = CURRENT_DATE THEN DATE (<<$pEndDate>>)
+         END >= DB_Overpayment.effective_date
+     OR CASE
+            WHEN DATE (<<$pBeginDate>>) = CURRENT_DATE THEN cast(dateadd(days, cast(floor(-1) AS int), CURRENT_DATE) AS date)
+            ELSE DATE (<<$pBeginDate>>)
+        END <= DB_Overpayment.effective_date
+     AND CASE
+             WHEN DATE (<<$pEndDate>>) = CURRENT_DATE THEN cast(dateadd(days, cast(floor(-1) AS int), CURRENT_DATE) AS date)
+             ELSE DATE (<<$pEndDate>>)
+         END >= DB_Overpayment.effective_date
+     AND client_id = cast(<<$pClientId>> AS int)) --select * from Overpayment_Report
+,
+     mv_person AS
+  (SELECT DISTINCT global_client_id ,
+                   global_person_id ,
+                   client_id,
+                   client_id_string ,
+                   platform_person_internal_id ,
+                   gender ,
+                   standard_gender AS SEX_CD ,
+                   birth_date ,
+                   person_reason_code ,
+                   union_name ,
+                   platform_id ,
+                   begin_date ,
+                   end_date ,
+                   PRSN_DIMN7.last_name AS LAST_NM ,
+                   PRSN_DIMN7.first_name AS FRST_NM ,
+                   PRSN_DIMN7.middle_name AS MID_NM ,
+                   PRSN_DIMN7.is_bad_preferred_address AS BAD_ADDR_IND_CD ,
+                   row_level_security_filter_value
+   FROM person_rpt.person PRSN_DIMN7
+   WHERE
+begin_date <= <<$pEndDate>>
+     AND end_date >= <<$pBeginDate>>
+     AND client_id = cast(<<$pClientId>> AS int)) --select * from mv_person
+,
+     mv_person_employment AS
+  (SELECT DISTINCT global_client_id ,
+                   global_person_id ,
+                   client_id ,
+                   platform_person_internal_id ,
+                   platform_id ,
+                   expected_annual_base_salary ,
+                   hourly_salary_status ,
+                   fulltime_parttime_status ,
+                   standard_value ,
+                   standard_employment_status AS employment_status ,
+                   hire_date ,
+                   termination_date ,
+                   begin_date AS effective_begin_date ,
+                   employee_id
+   FROM person_rpt.person_employment
+   LEFT OUTER JOIN adlfound_itg.standard_rollups_lookup rl
+		ON person_employment.standard_employment_status_code = rl.standard_key
+		AND standard_group_key in ('EMPL-STAT-CD-ROLLUP1')
+
+   WHERE --upper(trim(employment_status)) in  ('ACTIVE','INACTIVE')AND
+ begin_date <= <<$pEndDate>>
+     AND end_date >= <<$pBeginDate>>
+     AND client_id = cast(<<$pClientId>> AS int)),
+     pcf AS
+  (SELECT *
+   FROM person_itg.person_custom_filter
+   WHERE client_id =cast(<<$pClientId>> AS int)
+     AND data_product = 'DB'
+     AND begin_date <= last_day(<<$pEndDate>>)
+     AND end_date >= last_day(<<$pEndDate>>)) ,
+     person AS
+  (SELECT p.global_client_id ,
+          p.global_person_id ,
+          p.client_id,
+          p.platform_id,
+          p.client_id_string ,
+          p.platform_person_internal_id ,
+          e.expected_annual_base_salary AS salary ,
+          e.hourly_salary_status ,
+          e.fulltime_parttime_status ,
+          e.employment_status ,
+          p.person_reason_code ,
+          p.union_name ,
+          p.gender ,
+          p.FRST_NM ,
+          p.MID_NM ,
+          p.LAST_NM ,
+          p.birth_date ,
+          CASE
+              WHEN p.person_reason_code = 'Employee'
+                   AND upper(e.standard_value) <> 'ACTIVE'
+                   AND e.termination_date IS NOT NULL
+                   AND EXTRACT(YEAR
+                               FROM e.termination_date) <> 2299 THEN e.termination_date
+              ELSE NULL
+          END AS termination_date ,
+          e.hire_date ,
+          e.effective_begin_date ,
+          e.employee_id ,
+          FLOOR(CASE
+              WHEN p.birth_date IN ('1800-01-01' ,
+                                    '1900-01-01' ,
+                                    '1901-01-01' ,
+                                    '1910-01-01' ,
+                                    '1930-01-01') THEN NULL
+              ELSE ROUND(DATEDIFF(DAY, p.birth_date, last_day(<<$pBeginDate>>)) / 365.25, 2)
+          END) AS age ,
+          CASE
+              WHEN p.person_reason_code = 'Employee'
+                   AND upper(e.standard_value) = 'ACTIVE' THEN ROUND(DATEDIFF(DAY, e.hire_date, last_day(<<$pBeginDate>>)) / 365.25, 2)
+              WHEN p.person_reason_code = 'Employee'
+                   AND upper(e.standard_value) <> 'ACTIVE'
+                   AND e.termination_date IS NOT NULL
+                   AND EXTRACT(YEAR
+                               FROM e.termination_date) <> 2299 THEN ROUND(DATEDIFF(DAY, e.hire_date, e.termination_date) / 365.25, 2)
+              ELSE NULL
+          END AS tenure,
+          p.row_level_security_filter_value,
+          pcf.custom_filter_1,
+          pcf.custom_filter_2,
+          pcf.custom_filter_3,
+          pcf.custom_filter_4,
+          pcf.custom_filter_5,
+          BAD_ADDR_IND_CD
+   FROM mv_person p
+   INNER JOIN mv_person_employment e ON p.client_id = e.client_id
+   AND p.platform_person_internal_id = e.platform_person_internal_id
+   AND p.platform_id = e.platform_id --  AND p.global_client_id = e.global_client_id
+ --  AND p.global_person_id = e.global_person_id
+
+   AND p.client_id = cast(<<$pClientId>> AS int)
+   LEFT JOIN pcf ON p.platform_id = pcf.platform_id
+   AND p.platform_person_internal_id = pcf.platform_person_internal_id
+   AND p.client_id = pcf.client_id --								and p.begin_date <= pcf.end_date
+--								and p.end_date >= pcf.begin_date
+) --select * from person
+,
+     range_lookup AS
+  (SELECT standard_group_key ,
+          standard_display_name standard_display_value ,
+          standard_min ,
+          standard_max ,
+          OWNER
+   FROM adlfound_itg.standard_ranges_lookup),
+     db_person_attributes AS
+  (SELECT a.client_id,
+          a.platform_id,
+          a.client_id_string,
+          a.platform_person_internal_id,
+          a.salary,
+          D.standard_display_value AS SALARY_RANGE,
+          a.hourly_salary_status,
+          a.fulltime_parttime_status,
+          a.employment_status,
+          a.person_reason_code,
+          a.union_name,
+          a.gender,
+          a.age,
+          B.standard_display_value AS AGE_RANGE,
+          a.tenure,
+          C.standard_display_value AS TENURE_RANGE,
+          a.row_level_security_filter_value,
+          a.custom_filter_1,
+          a.custom_filter_2,
+          a.custom_filter_3,
+          a.custom_filter_4,
+          a.custom_filter_5,
+          a.FRST_NM,
+          a.MID_NM,
+          a.LAST_NM,
+          a.birth_date,
+          a.effective_begin_date,
+          a.employee_id
+   FROM person a
+   LEFT JOIN
+     (SELECT *
+      FROM range_lookup
+      WHERE standard_group_key = 'AGE_RANGE_DB') b ON floor(a.age) BETWEEN b.standard_min AND b.standard_max
+   LEFT JOIN
+     (SELECT *
+      FROM range_lookup
+      WHERE standard_group_key = 'TENURE') C ON floor(a.tenure) BETWEEN C.standard_min AND C.standard_max
+   LEFT JOIN
+     (SELECT *
+      FROM range_lookup
+      WHERE standard_group_key = 'SALARY_RANGE_WEALTH') D ON floor(a.salary) BETWEEN D.standard_min AND D.standard_max) --select * from db_person_attributes
+,
+     PRSN_PLANSTAT_DIMN01 AS
+  (SELECT a.client_id AS CLIENT_ID ,
+          a.platform_id,
+          a.platform_person_internal_id AS PRSN_INTN_ID ,
+          plan_status_description ,
+          a.plan_id AS PLAN_ID ,
+          c.plan_ldsc_tx AS Plan_Description
+   FROM wealth_rpt.person_planstatus_dim a
+   INNER JOIN wealth_rpt.dc_category_dim b ON a.client_id = b.client_id
+   AND a.category_id = b.category_id
+   AND a.plan_id = b.plan_id
+   INNER JOIN wealth_rpt.db_plan_dim c ON a.client_id = c.client_id
+   AND a.plan_id = c.plan_id
+   WHERE a.platform_indicator_code IN ('R3',
+                                       'R4',
+                                       'DBE')
+     AND b.category_type_code = 'PS'
+     AND last_day(<<$pBeginDate>>) >= a.begin_date
+     AND last_day(<<$pBeginDate>>) <= a.end_date
+     AND b.category_definition_brand_code = 'DB-AVLB'
+     AND a.client_id = cast(<<$pClientId>> AS int))  --select * from PRSN_PLANSTAT_DIMN01
+, main as (
+SELECT Person.client_id_string,
+       Person.row_level_security_filter_value,
+       Person.platform_person_internal_id AS platform_person_internal_id,
+	   person.client_id,
+	   person.platform_id,
+       Person.LAST_NM AS Last_Name,
+       Person.MID_NM AS Middle_Name,
+       Person.FRST_NM AS First_Name,
+       Person.employment_status AS Employment_Status,
+       Person.person_reason_code AS Person_Type,
+       Person.effective_begin_date AS Employment_Status_Begin_Date,
+       Overpayment_Report.PMT_ID AS Payment_ID,
+       DB_PMT_DIMN5.pmt_ldsc_tx AS Payment_Description,
+       Overpayment_Report.EFT_DT AS Payment_Effective_Date,
+       Overpayment_Report.BAL_AT AS Balance_Amount,
+       Overpayment_Report.repayment_type_code AS Repayment_Type_Code,
+       Overpayment_Report.PLAN_ID AS Plan_ID,
+       DB_Plan_Dimension.Plan_Description AS Plan_Name,
+       DB_Plan_Dimension.plan_status_description AS plan_status,
+       Overpayment_Report.CMNTS AS Comments,
+       Overpayment_Report.ACT_REF_NMBR_ID AS Activity_Reference_Number_ID,
+       Overpayment_Report.BAL_APLY_VL_AT AS Balance_Value_Being_Applied,
+       Overpayment_Report.Repayment_Type_text AS Repayment_Long_Description,
+       salary,
+       SALARY_RANGE,
+       hourly_salary_status,
+       fulltime_parttime_status,
+       person_reason_code,
+       union_name,
+       gender,
+       birth_date,
+       age,
+       AGE_RANGE,
+       tenure,
+       TENURE_RANGE,
+       custom_filter_1,
+       custom_filter_2,
+       custom_filter_3,
+       custom_filter_4,
+       custom_filter_5,
+       employee_id
+FROM Overpayment_Report
+INNER JOIN wealth_rpt.db_pmt_dim DB_PMT_DIMN5 ON Overpayment_Report.PMT_ID = DB_PMT_DIMN5.pmt_id
+AND Overpayment_Report.client_id = DB_PMT_DIMN5.client_id
+LEFT JOIN PRSN_PLANSTAT_DIMN01 DB_Plan_Dimension ON Overpayment_Report.PLAN_ID = DB_Plan_Dimension.plan_id
+AND Overpayment_Report.platform_id = DB_Plan_Dimension.platform_id
+AND Overpayment_Report.client_id = DB_Plan_Dimension.client_id
+AND Overpayment_Report.PRSN_INTN_ID = DB_Plan_Dimension.PRSN_INTN_ID
+INNER JOIN db_person_attributes Person ON 
+Overpayment_Report.platform_id = Person.platform_id AND
+cast(Overpayment_Report.PRSN_INTN_ID AS int) = cast(Person.platform_person_internal_id AS int) --and  cast(Overpayment_Report.client_id as int) = cast(Person.client_id as int)
+GROUP BY Person.client_id_string,
+         Person.row_level_security_filter_value,
+         Person.platform_person_internal_id,
+		    person.client_id,
+	   person.platform_id,
+         Person.LAST_NM,
+         Person.MID_NM,
+         Person.FRST_NM,
+         Person.employment_status,
+         Person.person_reason_code,
+         Person.effective_begin_date,
+         Overpayment_Report.PMT_ID,
+         DB_PMT_DIMN5.pmt_ldsc_tx,
+         Overpayment_Report.EFT_DT,
+         Overpayment_Report.BAL_AT,
+         Overpayment_Report.repayment_type_code,
+         Overpayment_Report.PLAN_ID,
+         DB_Plan_Dimension.Plan_Description,
+         DB_Plan_Dimension.plan_status_description,
+         Overpayment_Report.CMNTS,
+         Overpayment_Report.ACT_REF_NMBR_ID ,
+         Overpayment_Report.BAL_APLY_VL_AT,
+         Overpayment_Report.Repayment_Type_text,
+         salary,
+         SALARY_RANGE,
+         hourly_salary_status,
+         fulltime_parttime_status,
+         employment_status,
+         person_reason_code,
+         union_name,
+         gender,
+         birth_date,
+         age,
+         AGE_RANGE,
+         tenure,
+         TENURE_RANGE,
+         custom_filter_1,
+         custom_filter_2,
+         custom_filter_3,
+         custom_filter_4,
+         custom_filter_5,
+         employee_id)
+		
+Select * From main
